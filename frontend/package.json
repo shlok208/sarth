@@ -48,5 +48,10 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "description": "",
+  "main": "postcss.config.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

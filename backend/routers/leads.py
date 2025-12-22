@@ -243,6 +243,7 @@ async def _process_meta_lead(lead_data: Dict[str, Any]):
         form_id = lead_data.get("form_id")
         ad_id = lead_data.get("ad_id")
         adgroup_id = lead_data.get("adgroup_id")
+        page_id = lead_data.get("page_id") or lead_data.get("page")  # meta webhook usually includes page_id
         created_time = lead_data.get("created_time")
         
         # Extract field data
@@ -259,13 +260,13 @@ async def _process_meta_lead(lead_data: Dict[str, Any]):
         email = lead_info.get("email", "")
         phone = lead_info.get("phone_number", "") or lead_info.get("phone", "")
         
-        # Determine user_id from ad_id or form_id
-        # For now, we'll need to store ad_id to user_id mapping
-        # This is a simplified version - you may need to enhance this
-        user_id = _get_user_id_from_ad(ad_id, form_id)
+        # Determine user_id from ad_id, form_id, or page_id (fallbacks included)
+        user_id = _get_user_id_from_ad(ad_id, form_id, page_id)
         
         if not user_id:
-            logger.warning(f"Could not determine user_id for lead {leadgen_id}")
+            logger.warning(
+                f"Could not determine user_id for lead {leadgen_id} (ad_id={ad_id}, form_id={form_id}, page_id={page_id})"
+            )
             return
         
         # Prepare lead data for agent
@@ -294,18 +295,35 @@ async def _process_meta_lead(lead_data: Dict[str, Any]):
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 
-def _get_user_id_from_ad(ad_id: Optional[str], form_id: Optional[str]) -> Optional[str]:
-    """Get user_id from ad_id or form_id"""
-    # This is a placeholder - you'll need to implement proper mapping
-    # Options:
-    # 1. Store ad_id -> user_id mapping in database
-    # 2. Query Meta API to get page_id, then map page_id to user_id
-    # 3. Store form_id -> user_id mapping
-    
-    # For now, return None and log warning
-    # In production, implement proper mapping
-    logger.warning(f"User ID mapping not implemented for ad_id={ad_id}, form_id={form_id}")
-    return None
+def _get_user_id_from_ad(ad_id: Optional[str], form_id: Optional[str], page_id: Optional[str]) -> Optional[str]:
+    """Resolve user_id for a Meta lead using multiple fallback strategies."""
+    try:
+        # Prefer admin client to bypass RLS for cross-tenant lookups
+        client = supabase_admin
+
+        # 1) Page mapping via platform_connections (common for FB/IG pages)
+        if page_id:
+            result = client.table("platform_connections").select("user_id").eq("page_id", page_id).eq("is_active", True).limit(1).execute()
+            if result.data:
+                return result.data[0]["user_id"]
+
+        # 2) Existing lead with same ad_id
+        if ad_id:
+            result = client.table("leads").select("user_id").eq("ad_id", ad_id).limit(1).execute()
+            if result.data:
+                return result.data[0]["user_id"]
+
+        # 3) Existing lead with same form_id
+        if form_id:
+            result = client.table("leads").select("user_id").eq("form_id", form_id).limit(1).execute()
+            if result.data:
+                return result.data[0]["user_id"]
+
+        logger.warning(f"User ID mapping not found for ad_id={ad_id}, form_id={form_id}, page_id={page_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Error resolving user_id for ad_id={ad_id}, form_id={form_id}, page_id={page_id}: {e}")
+        return None
 
 # WhatsApp Webhook Endpoints
 @router.get("/whatsapp/webhook")
