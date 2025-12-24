@@ -175,10 +175,6 @@ class deleteleadPayload(BaseModel):
     lead_name: Optional[str] = None
     confirm_delete: Optional[bool] = None
 
-class exportleadPayload(BaseModel):
-    platform: Optional[str] = None
-    date_range: Optional[str] = None
-
 class LeadsInsightsPayload(BaseModel):
     lead_id: Optional[str] = None
     lead_name: Optional[str] = None
@@ -200,7 +196,6 @@ class LeadsManagementPayload(BaseModel):
             "update_lead",
             "search_lead",
             "delete_lead",
-            "export_leads",
             "insight"
         ]
     ] = None
@@ -210,8 +205,7 @@ class LeadsManagementPayload(BaseModel):
     update_lead: Optional[updateleadPayload] = None
     search_lead: Optional[searchleadPayload] = None
     delete_lead: Optional[deleteleadPayload] = None
-    export_leads: Optional[exportleadPayload] = None
-
+    add_method: Optional[str] = None
     # Flattened fields (helps when LLM doesn't nest under add/update/search)
     lead_name: Optional[str] = None
     lead_email: Optional[EmailStr] = None
@@ -679,6 +673,7 @@ class IntentBasedChatbot:
                 "date_range",
                 "key",
                 "status_type",
+                "add_method",
             ]
             for field in lead_fields:
                 if payload_dict.get(field) is not None:
@@ -693,9 +688,18 @@ class IntentBasedChatbot:
                     "addlead": "add_lead",
                     "update": "update_lead",
                     "search": "search_lead",
-                    "export": "export_leads",
                 }
                 leads_payload["action"] = action_aliases.get(normalized_action, normalized_action)
+
+            add_method = leads_payload.get("add_method")
+            if isinstance(add_method, str):
+                normalized_method = add_method.strip().lower()
+                if "import" in normalized_method or "csv" in normalized_method:
+                    leads_payload["add_method"] = "import_csv"
+                else:
+                    leads_payload["add_method"] = "manual"
+            elif add_method is not None and not isinstance(add_method, str):
+                leads_payload.pop("add_method", None)
 
             # If no action yet, infer from nested blocks
             if not leads_payload.get("action"):
@@ -705,10 +709,6 @@ class IntentBasedChatbot:
                     leads_payload["action"] = "update_lead"
                 elif leads_payload.get("search_lead"):
                     leads_payload["action"] = "search_lead"
-                elif leads_payload.get("export_leads"):
-                    leads_payload["action"] = "export_leads"
-
-
             # Flatten nested structures into top-level convenience fields
             if leads_payload.get("add_lead") and isinstance(leads_payload["add_lead"], dict):
                 add_block = leads_payload["add_lead"]
@@ -771,11 +771,6 @@ class IntentBasedChatbot:
                 leads_payload.setdefault("key", sea_block.get("key"))
                 leads_payload.setdefault("lead_id", sea_block.get("lead_id"))
                 leads_payload.setdefault("date_range", sea_block.get("date_range") or leads_payload.get("date_range"))
-
-            if leads_payload.get("export_leads") and isinstance(leads_payload["export_leads"], dict):
-                exp_block = leads_payload["export_leads"]
-                leads_payload.setdefault("platform", exp_block.get("platform"))
-                leads_payload.setdefault("date_range", exp_block.get("date_range") or leads_payload.get("date_range"))
 
         return payload_dict
     
@@ -889,8 +884,6 @@ class IntentBasedChatbot:
             extracted["action"] = "search_lead"
         elif any(keyword in query_lower for keyword in ["delete lead", "delete_lead", "remove lead", "delete a lead"]):
             extracted["action"] = "delete_lead"
-        elif any(keyword in query_lower for keyword in ["export lead", "export_leads"]):
-            extracted["action"] = "export_leads"
         elif any(keyword in query_lower for keyword in ["insight", "lead analytics", "lead stats"]):
             extracted["action"] = "insight"
         
@@ -980,8 +973,8 @@ class IntentBasedChatbot:
         if not action:
             missing.append({
                 "field": "action",
-                "question": "What would you like to do with leads? (add, update, search, delete, export, or get insights)",
-                "options": ["add_lead", "update_lead", "search_lead", "delete_lead", "export_leads", "insight"],
+                "question": "What would you like to do with leads? (add, update, search, delete, or get insights)",
+                "options": ["add lead", "update lead", "search lead", "delete lead", "insight"],
                 "priority": 1
             })
             return missing
@@ -999,6 +992,15 @@ class IntentBasedChatbot:
         date_range = getattr(payload, "date_range", None)
 
         if action == "add_lead":
+            add_method = getattr(payload, "add_method", None)
+            if not add_method:
+                missing.append({
+                    "field": "add_method",
+                    "question": "Would you like to add this lead manually or import a CSV file?",
+                    "options": ["manual", "import csv"],
+                    "priority": 0
+                })
+                return missing
             if not lead_name or lead_name == "":
                 missing.append({
                     "field": "lead_name",
@@ -1006,12 +1008,19 @@ class IntentBasedChatbot:
                     "options": None,
                     "priority": 1
                 })
-            if (not lead_email or lead_email == "") and (not lead_phone or lead_phone == ""):
+            if not lead_email or lead_email == "":
                 missing.append({
-                    "field": "contact",
-                    "question": "Can you share the lead's email or phone number?",
+                    "field": "lead_email",
+                    "question": "What is the lead's email address?",
                     "options": None,
                     "priority": 2
+                })
+            if not lead_phone or lead_phone == "":
+                missing.append({
+                    "field": "lead_phone",
+                    "question": "Can you share the lead's phone number (include country code if possible)?",
+                    "options": None,
+                    "priority": 3
                 })
             if not platform or platform == "":
                 missing.append({
@@ -1058,7 +1067,7 @@ class IntentBasedChatbot:
             if not (lead_name or lead_email or lead_phone or lead_id or date_range):
                 missing.append({
                     "field": "search_criteria",
-                    "question": "How should I search for leads? You can give a name, email, phone, ID, or a keyword.",
+                    "question": "How should I search for leads? You can give a lead name.",
                     "options": None,
                     "priority": 1
                 })
@@ -1134,9 +1143,6 @@ class IntentBasedChatbot:
                     "delete": "delete_lead",
                     "delete_lead": "delete_lead",
                     "remove": "delete_lead",
-                    "export": "export_leads",
-                    "export_leads": "export_leads",
-                    "download": "export_leads",
                     "insight": "insight",
                     "insights": "insight",
                     "analytics": "insight",
@@ -1154,6 +1160,14 @@ class IntentBasedChatbot:
                 # Handle update_lead name clarification (same as lead_name)
                 leads["lead_name"] = value
                 logger.info(f"✅ Set lead_name = '{value}' (from update_lead_name)")
+
+            elif field == "lead_email":
+                leads["lead_email"] = value
+                logger.info(f"✅ Set lead_email = '{value}'")
+
+            elif field == "lead_phone":
+                leads["lead_phone"] = value
+                logger.info(f"✅ Set lead_phone = '{value}'")
 
             elif field == "contact":
                 if "@" in value:
@@ -1194,6 +1208,14 @@ class IntentBasedChatbot:
             elif field == "status":
                 leads["status"] = value.lower()
                 logger.info(f"✅ Set status = '{value.lower()}'")
+
+            elif field == "add_method":
+                normalized = value.strip().lower()
+                if "import" in normalized or "csv" in normalized:
+                    leads["add_method"] = "import_csv"
+                else:
+                    leads["add_method"] = "manual"
+                logger.info(f"✅ Set add_method = '{leads['add_method']}'")
 
             elif field == "remarks":
                 leads["remarks"] = None if value.lower() == "na" else value
@@ -1345,7 +1367,6 @@ class IntentBasedChatbot:
             "update lead", "edit lead", "modify lead",
             "search lead", "search leads", "find lead", "find leads",
             "delete lead", "remove lead",
-            "export leads", "download leads",
             "lead insights", "lead analytics", "lead stats",
             "leads page",
         ]
@@ -1366,8 +1387,6 @@ class IntentBasedChatbot:
                     seeded_payload["leads"]["action"] = "search_lead"
                 elif any(k in query_lower for k in ["delete lead", "remove lead", "delete a lead"]):
                     seeded_payload["leads"]["action"] = "delete_lead"
-                elif any(k in query_lower for k in ["export leads", "export lead", "download leads", "download lead"]):
-                    seeded_payload["leads"]["action"] = "export_leads"
                 elif any(k in query_lower for k in ["lead insights", "insight", "analytics", "stats", "performance"]):
                     seeded_payload["leads"]["action"] = "insight"
 
@@ -1603,7 +1622,6 @@ For leads_management intent, you MUST extract ALL lead-related information from 
    - "add lead", "create lead", "new lead", "add a lead" → action: "add_lead"
    - "update lead", "modify lead", "change lead", "edit lead" → action: "update_lead"
    - "search lead", "find lead", "look for lead" → action: "search_lead"
-   - "export leads", "download leads" → action: "export_leads"
    - "lead insights", "lead analytics", "lead stats", "lead performance" → action: "insight"
 
 2. LEAD DATA EXTRACTION:
@@ -1619,7 +1637,7 @@ For leads_management intent, you MUST extract ALL lead-related information from 
 3. STRUCTURED OUTPUT FOR LEADS:
    The "leads" object should follow this structure:
    {{
-     "action": "add_lead" | "update_lead" | "search_lead" | "delete_lead" | "export_leads" | "insight",
+     "action": "add_lead" | "update_lead" | "search_lead" | "delete_lead" | "insight",
      "add_lead": {{
        "lead_name": "...",
        "lead_email": "...",
@@ -1642,10 +1660,6 @@ For leads_management intent, you MUST extract ALL lead-related information from 
      "search_lead": {{
        "key": "search term",
        "lead_id": "...",
-       "date_range": "..."
-     }},
-     "export_leads": {{
-       "platform": "...",
        "date_range": "..."
      }},
      "insight": {{
@@ -1824,34 +1838,16 @@ EXAMPLES OF CORRECT LEADS EXTRACTION:
     "general": null
   }}
 
-- User: "export leads from facebook last 30 days"
-  Output: {{
-    "intent": "leads_management",
-    "leads": {{
-      "action": "export_leads",
-      "export_leads": {{
-        "platform": "facebook",
-        "date_range": "last 30 days"
-      }},
-      "platform": "facebook",
-      "date_range": "last 30 days"
-    }},
-    "content": null,
-    "analytics": null,
-    "posting": null,
-    "general": null
-  }}
-
 CRITICAL RULES FOR LEADS:
 - Always extract ALL mentioned fields (name, email, phone, platform, status, remarks)
-- Populate both nested (add_lead/update_lead/search_lead/export_leads/insight) AND flattened fields
+- Populate both nested (add_lead/update_lead/search_lead/insight) AND flattened fields
 - If user provides single-word answers like "website", "new", "facebook" during clarification, extract them appropriately based on context
 - Never hallucinate missing information - leave fields as null if not mentioned
 - Extract phone numbers with country codes when present
 - Extract email addresses in proper format
 - Platform must be one of: website, facebook, instagram, linkedin, referral, manual, google, twitter, other
 - Status must be one of: new, contacted, responded, qualified, converted, lost
-- For action field, use exact values: add_lead, update_lead, search_lead, delete_lead, export_leads, insight (with underscores, not spaces)
+- For action field, use exact values: add_lead, update_lead, search_lead, delete_lead, insight (with underscores, not spaces)
 - When merging with existing partial payload, preserve all non-null leads fields and only update with new information
 
 General Rules:
@@ -2421,7 +2417,35 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                 leads_dict = {}
             
             # Detect action from user query using simple pattern matching (no LLM)
-            if not leads_dict.get("action"):
+            normalized_query = user_query.strip().lower()
+            insight_panel_map = {
+                "total leads": "summary",
+                "leads by status": "status",
+                "leads by platform": "platform",
+                "time-based trends": "time_trends",
+                "time based trends": "time_trends",
+                "time trends": "time_trends",
+                "weekly trends": "time_trends",
+                "weekly comparison": "time_trends"
+            }
+            if normalized_query in insight_panel_map:
+                leads_dict["action"] = "insight"
+                leads_dict["insight_type"] = insight_panel_map[normalized_query]
+                logger.info(
+                    f"✅ Interpreted insight option '{user_query}' as insight_type '{insight_panel_map[normalized_query]}'"
+                )
+            elif not leads_dict.get("action"):
+                if any(keyword in normalized_query for keyword in ["total leads", "insights", "lead stats", "time trends", "weekly", "time-based"]):
+                    leads_dict["action"] = "insight"
+                    logger.info("✅ Routing generic insight option click to insight action")
+                    if "total leads" in normalized_query:
+                        leads_dict.setdefault("insight_type", "summary")
+                    elif "status" in normalized_query:
+                        leads_dict.setdefault("insight_type", "status")
+                    elif "platform" in normalized_query:
+                        leads_dict.setdefault("insight_type", "platform")
+                    elif "time" in normalized_query:
+                        leads_dict.setdefault("insight_type", "time_trends")
                 if any(keyword in user_query for keyword in ["add lead", "add_lead", "create lead", "new lead", "add a lead"]):
                     leads_dict["action"] = "add_lead"
                     logger.info("✅ Detected action: add_lead from user query")
@@ -2434,12 +2458,16 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                 elif any(keyword in user_query for keyword in ["delete lead", "delete_lead", "remove lead", "delete a lead"]):
                     leads_dict["action"] = "delete_lead"
                     logger.info("✅ Detected action: delete_lead from user query")
-                elif any(keyword in user_query for keyword in ["export lead", "export_leads", "download lead"]):
-                    leads_dict["action"] = "export_leads"
-                    logger.info("✅ Detected action: export_leads from user query")
                 elif any(keyword in user_query for keyword in ["insight", "analytics", "stats", "performance"]):
                     leads_dict["action"] = "insight"
                     logger.info("✅ Detected action: insight from user query")
+            elif leads_dict.get("action") == "search_lead":
+                if any(keyword in user_query for keyword in ["update lead", "update_lead", "modify lead", "change lead", "edit lead"]):
+                    leads_dict["action"] = "update_lead"
+                    logger.info("✅ Overriding action to update_lead after search results")
+                elif any(keyword in user_query for keyword in ["delete lead", "delete_lead", "remove lead", "delete a lead"]):
+                    leads_dict["action"] = "delete_lead"
+                    logger.info("✅ Overriding action to delete_lead after search results")
             
             # Store leads_dict back to partial_payload
             partial_payload["leads"] = leads_dict
@@ -2447,9 +2475,9 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
             
             # If still no action, ask for clarification
             if not leads_dict or not leads_dict.get("action"):
-                state["response"] = "What would you like to do with leads? You can get insights, add a lead, update a lead, search leads, delete a lead, or export leads."
+                state["response"] = "What would you like to do with leads? You can get insights, add a lead, update a lead, search leads, or delete a lead."
                 state["needs_clarification"] = True
-                state["options"] = ["insight", "add_lead", "update_lead", "search_lead", "delete_lead", "export_leads"]
+                state["options"] = ["insight", "add lead", "update lead", "search lead", "delete lead"]
                 return state
             
             import re
@@ -2713,11 +2741,6 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                 leads_dict.setdefault("lead_id", sea_block.get("lead_id"))
                 leads_dict.setdefault("date_range", sea_block.get("date_range") or leads_dict.get("date_range"))
 
-            if leads_dict.get("export_leads") and isinstance(leads_dict["export_leads"], dict):
-                exp_block = leads_dict["export_leads"]
-                leads_dict.setdefault("platform", exp_block.get("platform"))
-                leads_dict.setdefault("date_range", exp_block.get("date_range") or leads_dict.get("date_range"))
-
             # Note: "na" for remarks is kept as-is during validation
             # It will be normalized to None when executing the operation
 
@@ -2725,16 +2748,16 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                 payload = LeadsManagementPayload(**leads_dict)
             except Exception as e:
                 logger.error(f"Failed to validate leads payload: {e}")
-                state["response"] = "I couldn't understand the leads request. Please specify the action (insights, add, update, search, delete, or export)."
+                state["response"] = "I couldn't understand the leads request. Please specify the action (insights, add, update, search, or delete)."
                 state["needs_clarification"] = True
-                state["options"] = ["insight", "add_lead", "update_lead", "search_lead", "delete_lead", "export_leads"]
+                state["options"] = ["insight", "add lead", "update lead", "search lead", "delete lead"]
                 return state
 
             # IMPORTANT: Update partial_payload with normalized leads_dict before checking missing fields
             # This ensures the normalized values are persisted
             partial_payload["leads"] = leads_dict
             state["partial_payload"] = partial_payload
-            
+          
             # Ask for missing required fields with clear priority
             missing_fields = self._get_missing_fields_for_leads(payload, asked_questions)
 
@@ -2783,30 +2806,80 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
                 state["partial_payload"] = partial_payload
                 return state
             elif result.get("success") and result.get("data"):
-                state["response"] = self._format_leads_response(result["data"])
-                state["options"] = result.get("options")
-                state["needs_clarification"] = False
+                data = result["data"]
+
                 if payload_action == "search_lead":
-                    selected_lead = result.get("data", {}).get("selected_lead")
-                    if selected_lead:
-                        leads_ctx = partial_payload.setdefault("leads", {})
-                        for key in ["lead_id", "lead_name", "lead_email", "lead_phone", "platform"]:
-                            value = selected_lead.get(key)
-                            if value:
-                                leads_ctx[key] = value
-                        partial_payload["leads"] = leads_ctx
-                        asked_questions["identified_lead_id"] = selected_lead.get("lead_id")
-                        if selected_lead.get("lead_name"):
-                            asked_questions["identified_lead_name"] = selected_lead.get("lead_name")
-                        state["partial_payload"] = partial_payload
-                        state["asked_questions"] = asked_questions
+                    leads_list = data.get("leads") or []
+                    lead_for_context = data.get("selected_lead") or (leads_list[0] if leads_list else None)
+
+                    response_lines = ["Here are the lead details I found:"]
+                    if lead_for_context:
+                        response_lines.extend(self._build_lead_info_lines(lead_for_context))
                     else:
-                        # Keep existing context even if no explicit selection
-                        state["partial_payload"] = partial_payload
-                        state["asked_questions"] = asked_questions
+                        response_lines.append("• Unable to fetch detailed lead information right now.")
+
+                    if lead_for_context and len(leads_list) > 1:
+                        response_lines.append(f"({len(leads_list)} total matches found; showing the most recent one.)")
+
+                    response_lines.append("")
+                    response_lines.append("Would you like to update this lead or delete it?")
+
+                    state["response"] = "\n".join(response_lines)
+                    state["needs_clarification"] = True
+                    state["options"] = ["update lead", "delete  lead"]
+
+                    if lead_for_context:
+                        leads_ctx = partial_payload.setdefault("leads", {})
+
+                        field_mappings = {
+                            "lead_id": ["lead_id", "id"],
+                            "lead_name": ["lead_name", "name"],
+                        }
+                        for canonical, keys in field_mappings.items():
+                            for key in keys:
+                                value = lead_for_context.get(key)
+                                if value:
+                                    leads_ctx[canonical] = value
+                                    break
+
+                        identified_id = lead_for_context.get("lead_id") or lead_for_context.get("id")
+                        if identified_id:
+                            asked_questions["identified_lead_id"] = identified_id
+                        identified_name = lead_for_context.get("lead_name") or lead_for_context.get("name")
+                        if identified_name:
+                            asked_questions["identified_lead_name"] = identified_name
+
+                        partial_payload["leads"] = leads_ctx
+
+                    state["partial_payload"] = partial_payload
+                    state["asked_questions"] = asked_questions
+                    if result.get("content_data"):
+                        state["content_data"] = result.get("content_data")
+                    return state
+
+                state["response"] = self._format_leads_response(data)
+                if payload_action == "insight":
+                    insight_context = data.get("insight_context", {}) or {}
+                    leads_context = partial_payload.setdefault("leads", {})
+                    for key, value in insight_context.items():
+                        if value:
+                            leads_context[key] = value
+                    partial_payload["leads"] = leads_context
+                    state["partial_payload"] = partial_payload
+                    state["asked_questions"] = asked_questions
+                    leads_dict = leads_context
+                    insight_options = data.get("insights", {}).get("options")
+                    state["options"] = insight_options or [
+                        "Total leads",
+                        "Leads by status",
+                        "Leads by platform",
+                        "Time-based trends"
+                    ]
                 else:
+                    state["options"] = result.get("options")
                     state.pop("partial_payload", None)
                     state.pop("asked_questions", None)
+                state["needs_clarification"] = False
                 if result.get("content_data"):
                     state["content_data"] = result.get("content_data")
             elif result.get("error"):
@@ -2908,6 +2981,40 @@ Return ONLY valid JSON matching the IntentPayload structure. No explanations, no
             elif "summary" in data:
                 return data["summary"]
         return str(data)
+
+    def _build_lead_info_lines(self, lead: Dict[str, Any]) -> List[str]:
+        """Helper to build a clean, bullet-style summary for a single lead."""
+        def pick(*keys: str) -> Optional[str]:
+            for key in keys:
+                value = lead.get(key)
+                if value:
+                    return value
+            return None
+
+        lines: List[str] = []
+        name = pick("lead_name", "name")
+        if name:
+            lines.append(f"• Name: {name}")
+
+        status = pick("status", "lead_status")
+        if status:
+            lines.append(f"• Initial status: {status}")
+        else:
+            lines.append(f"• Initial status: Not specified")
+
+        platform = pick("platform", "source_platform")
+        if platform:
+            lines.append(f"• Platform: {platform}")
+
+        email = pick("lead_email", "email")
+        if email:
+            lines.append(f"• Email: {email}")
+
+        phone = pick("lead_phone", "phone_number")
+        if phone:
+            lines.append(f"• Phone: {phone}")
+
+        return lines
     
     def _format_posting_response(self, data: Any) -> str:
         """Format posting manager response"""

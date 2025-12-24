@@ -1,12 +1,11 @@
 """
 Chase Leads Manager Tool
-Handles all lead management operations (add, update, search, export, insight)
+Handles all lead management operations (add, update, search, delete, insight)
 
 - add_lead: Add a new lead to the system
 - update_lead: Update an existing lead's information
 - search_lead: Search for leads by name, email, phone, or keywords
 - delete_lead: Delete a lead by ID (or by name with disambiguation) after confirmation
-- export_leads: Export leads to CSV/Excel (optionally filtered by platform/date)
 - insight: Generate insights and analytics for a specific lead
 
 Each operation validates required fields and returns either:
@@ -119,7 +118,6 @@ def execute_leads_operation(payload: LeadsManagementPayload, user_id: str, asked
       * "update_lead" → _handle_update_lead()
       * "search_lead" → _handle_search_lead()
       * "delete_lead" → _handle_delete_lead()
-      * "export_leads" → _handle_export_leads()
       * Unknown action → return error
     
     Args:
@@ -147,7 +145,7 @@ def execute_leads_operation(payload: LeadsManagementPayload, user_id: str, asked
         if not payload.action:
             return {
                 "success": False,
-                "clarifying_question": "What would you like to do with leads? (get insights, add a lead, update a lead, search leads, export leads)"
+                "clarifying_question": "What would you like to do with leads? (get insights, add a lead, update a lead, search leads, delete a lead)"
             }
         
         # Route to appropriate handler
@@ -159,8 +157,6 @@ def execute_leads_operation(payload: LeadsManagementPayload, user_id: str, asked
             return _handle_search_lead(payload, user_id, asked_questions)
         elif payload.action == "delete_lead":
             return _handle_delete_lead(payload, user_id, asked_questions)
-        elif payload.action == "export_leads":
-            return _handle_export_leads(payload, user_id, asked_questions)
         else:
             return {
                 "success": False,
@@ -203,6 +199,7 @@ def _handle_add_lead(payload: LeadsManagementPayload, user_id: str, asked_questi
     # Remove email from asked_questions if provided (user answered)
     if payload.lead_email:
         asked_questions.pop("lead_email_validation", None)
+        asked_questions.pop("lead_email", None)
         asked_questions.pop("contact", None)  # Also remove contact question if email provided
     
     # Validate email if provided
@@ -226,6 +223,7 @@ def _handle_add_lead(payload: LeadsManagementPayload, user_id: str, asked_questi
     # Remove phone from asked_questions if provided (user answered)
     if payload.lead_phone:
         asked_questions.pop("lead_phone_validation", None)
+        asked_questions.pop("lead_phone", None)
         asked_questions.pop("contact", None)  # Also remove contact question if phone provided
     
     # Validate phone if provided
@@ -247,14 +245,32 @@ def _handle_add_lead(payload: LeadsManagementPayload, user_id: str, asked_questi
             }
     
     # Check that at least email or phone is provided
-    if not payload.lead_email and not payload.lead_phone:
-        question_key = "contact"
-        question_text = "Can you share the lead's email or phone number? At least one contact method is required."
+    if not payload.lead_email:
+        question_key = "lead_email"
+        question_text = "What is the lead's email address?"
         
         if question_key in asked_questions:
             return {
                 "success": False,
-                "clarifying_question": f"I already asked for contact information. Please provide either an email address or phone number (or both) for the lead. Previously asked: '{asked_questions[question_key]}'",
+                "clarifying_question": f"I already asked for the lead's email. Please provide an email address to continue. Previously asked: '{asked_questions[question_key]}'",
+                "asked_questions": asked_questions
+            }
+        
+        asked_questions[question_key] = question_text
+        return {
+            "success": False,
+            "clarifying_question": question_text,
+            "asked_questions": asked_questions
+        }
+
+    if not payload.lead_phone:
+        question_key = "lead_phone"
+        question_text = "Can you share the lead's phone number (include the country code if possible)?"
+        
+        if question_key in asked_questions:
+            return {
+                "success": False,
+                "clarifying_question": f"I already asked for the lead's phone number. Please provide it to continue. Previously asked: '{asked_questions[question_key]}'",
                 "asked_questions": asked_questions
             }
         
@@ -934,6 +950,8 @@ def _handle_search_lead(payload: LeadsManagementPayload, user_id: str, asked_que
                 "lead_email": top.get("email"),
                 "lead_phone": top.get("phone_number"),
                 "platform": top.get("source_platform"),
+                "status": top.get("status"),
+                "lead_status": top.get("status"),
             }
 
         message_lines = ["I found the lead(s). Here are the details:"]
@@ -994,26 +1012,6 @@ def _handle_delete_lead(payload: LeadsManagementPayload, user_id: str, asked_que
             "asked_questions": asked_questions
         }
 
-    # Require confirmation
-    if payload.confirm_delete is not True:
-        question_key = "confirm_delete"
-        target_label = lead_name or lead_id or "this lead"
-        question_text = f"Are you sure you want to delete {target_label}? (yes/no)"
-        if question_key in asked_questions:
-            return {
-                "success": False,
-                "clarifying_question": f"I already asked for confirmation. Please reply **yes** to delete or **no** to cancel. Previously asked: '{asked_questions[question_key]}'",
-                "options": ["yes", "no"],
-                "asked_questions": asked_questions
-            }
-        asked_questions[question_key] = question_text
-        return {
-            "success": False,
-            "clarifying_question": question_text,
-            "options": ["yes", "no"],
-            "asked_questions": asked_questions
-        }
-
     # ACTUAL SUPABASE DELETE IMPLEMENTATION
     try:
         from supabase import create_client
@@ -1046,6 +1044,10 @@ def _handle_delete_lead(payload: LeadsManagementPayload, user_id: str, asked_que
             if len(rows) == 1:
                 lead_row = rows[0]
                 asked_questions["identified_lead_id"] = lead_row["id"]
+                verified_contact = lead_email or lead_phone
+                if verified_contact:
+                    asked_questions["contact_verified"] = verified_contact
+                    asked_questions.pop("contact_verification_pending", None)
                 asked_questions.pop("contact", None)
             elif len(rows) > 1:
                 # Try to narrow down using provided contact info (email/phone)
@@ -1059,6 +1061,10 @@ def _handle_delete_lead(payload: LeadsManagementPayload, user_id: str, asked_que
                 if len(filtered) == 1:
                     lead_row = filtered[0]
                     asked_questions["identified_lead_id"] = lead_row["id"]
+                    verified_contact = lead_email or lead_phone
+                    if verified_contact:
+                        asked_questions["contact_verified"] = verified_contact
+                        asked_questions.pop("contact_verification_pending", None)
                     asked_questions.pop("contact", None)
                 else:
                     choices = []
@@ -1076,6 +1082,7 @@ def _handle_delete_lead(payload: LeadsManagementPayload, user_id: str, asked_que
                         "Please share the phone number or email of the lead you want to delete."
                     )
                     asked_questions["contact"] = question_text
+                    asked_questions["contact_verification_pending"] = True
                     return {
                         "success": False,
                         "clarifying_question": (
@@ -1088,6 +1095,34 @@ def _handle_delete_lead(payload: LeadsManagementPayload, user_id: str, asked_que
             return {
                 "success": False,
                 "error": "Lead not found (or it doesn’t belong to you)."
+            }
+
+        verified_contact = asked_questions.get("contact_verified")
+        if asked_questions.get("contact_verification_pending") and not verified_contact:
+            return {
+                "success": False,
+                "clarifying_question": "I’m still waiting for the phone number or email that matches one of the leads I found. Please share that so I can identify the correct lead.",
+                "asked_questions": asked_questions
+            }
+
+        if payload.confirm_delete is not True:
+            question_key = "confirm_delete"
+            target_label = lead_row.get("name") or lead_id or "this lead"
+            verification_note = f" (verified via {verified_contact})" if verified_contact else ""
+            question_text = f"Are you sure you want to delete {target_label}{verification_note}? (yes/no)"
+            if question_key in asked_questions:
+                return {
+                    "success": False,
+                    "clarifying_question": f"I already asked for confirmation. Please reply **yes** to delete or **no** to cancel. Previously asked: '{asked_questions[question_key]}'",
+                    "options": ["yes", "no"],
+                    "asked_questions": asked_questions
+                }
+            asked_questions[question_key] = question_text
+            return {
+                "success": False,
+                "clarifying_question": question_text,
+                "options": ["yes", "no"],
+                "asked_questions": asked_questions
             }
 
         lead_id = lead_row.get("id")
@@ -1116,79 +1151,273 @@ def _handle_delete_lead(payload: LeadsManagementPayload, user_id: str, asked_que
             "error": f"Database error: {str(e)}"
         }
 
-def _handle_export_leads(payload: LeadsManagementPayload, user_id: str, asked_questions: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle exporting leads"""
-    # TODO: Integrate with actual lead export
-    return {
-        "success": True,
-        "data": {
-            "message": "I'll export your leads. This feature is being set up."
-        },
-        "asked_questions": asked_questions
-    }
-
 def _handle_insight(payload: LeadsManagementPayload, user_id: str, asked_questions: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle lead insights query - Prioritized handler"""
+    """Handle lead insights query - Prioritized handler for aggregated metrics."""
+    from collections import Counter
+    from datetime import datetime, timedelta, timezone
+
     # Extract insight-specific fields (from nested payload or flattened fields)
     lead_id = payload.lead_id
     lead_name = payload.lead_name
     platform = payload.platform
     date_range = payload.date_range
     insight_type = payload.insight_type or payload.status_type  # Prefer insight_type, fallback to status_type
-    
-    # If insight payload exists, prioritize it and use its values
+
     if payload.insight:
         lead_id = payload.insight.lead_id or lead_id
         lead_name = payload.insight.lead_name or lead_name
         platform = payload.insight.platform or platform
         date_range = payload.insight.date_range or date_range
         insight_type = payload.insight.insight_type or insight_type
-    
-    # If no lead identifier specified, ask for clarification
-    if not lead_id and not lead_name:
-        question_key = "lead_id_insight"
-        question_text = "Which lead would you like insights for? Please provide the lead name or ID."
-        
-        if question_key in asked_questions:
+
+    # Build filter context description
+    context_fragments = []
+    if lead_id:
+        context_fragments.append(f"ID {lead_id}")
+    if lead_name:
+        context_fragments.append(f"name '{lead_name}'")
+    if platform:
+        context_fragments.append(f"platform '{platform}'")
+    context_description = " and ".join(context_fragments) if context_fragments else "all leads"
+
+    try:
+        from supabase import create_client
+        import os
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            logger.error("Supabase credentials not found for insights")
             return {
                 "success": False,
-                "clarifying_question": f"I already asked which lead you want insights for. Please provide the lead name or ID to continue. Previously asked: '{asked_questions[question_key]}'",
+                "error": "Database configuration error. Please contact support."
+            }
+
+        supabase = create_client(supabase_url, supabase_key)
+
+        query = supabase.table("leads").select(
+            "id,name,status,source_platform,created_at"
+        ).eq("user_id", user_id)
+
+        if platform:
+            query = query.eq("source_platform", platform)
+        if lead_id:
+            query = query.eq("id", lead_id)
+        elif lead_name:
+            query = query.ilike("name", f"%{lead_name}%")
+
+        response = query.order("created_at", desc=True).limit(2000).execute()
+        leads = response.data or []
+
+        if not leads:
+            return {
+                "success": False,
+                "error": f"No leads found for {context_description}.",
                 "asked_questions": asked_questions
             }
-        
-        asked_questions[question_key] = question_text
+
+        def _parse_created_at(created_at_value: Optional[str]) -> Optional[datetime]:
+            if not created_at_value:
+                return None
+            iso_ts = created_at_value
+            if iso_ts.endswith("Z"):
+                iso_ts = iso_ts.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(iso_ts)
+            except ValueError:
+                try:
+                    parsed = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%S.%f%z")
+                except Exception:
+                    return None
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed
+
+        now = datetime.utcnow()
+        start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_week = start_today - timedelta(days=start_today.weekday())
+        start_month = start_today.replace(day=1)
+        start_prev_week = start_week - timedelta(weeks=1)
+
+        status_counter: Counter[str] = Counter()
+        platform_counter: Counter[str] = Counter()
+        leads_this_day = leads_this_week = leads_this_month = 0
+        current_week_count = previous_week_count = 0
+
+        for lead in leads:
+            created_at = _parse_created_at(lead.get("created_at"))
+            if not created_at:
+                continue
+
+            if created_at >= start_today:
+                leads_this_day += 1
+            if created_at >= start_week:
+                leads_this_week += 1
+            if created_at >= start_month:
+                leads_this_month += 1
+
+            if created_at >= start_week:
+                current_week_count += 1
+            elif created_at >= start_prev_week:
+                previous_week_count += 1
+
+            status = lead.get("status")
+            if status:
+                status_counter[status] += 1
+
+            source_platform = lead.get("source_platform")
+            if source_platform:
+                platform_counter[source_platform] += 1
+
+        total_leads = len(leads)
+
+        status_breakdown = [
+            {"status": status, "count": count}
+            for status, count in status_counter.most_common()
+            if count > 0
+        ]
+
+        platform_breakdown = [
+            {"platform": platform_name, "count": count}
+            for platform_name, count in platform_counter.most_common()
+        ]
+
+        trend_difference = current_week_count - previous_week_count
+        if previous_week_count == 0 and current_week_count == 0:
+            trend_state = "steady"
+            trend_summary = "No leads were created this week or last week."
+        elif current_week_count >= previous_week_count:
+            trend_state = "improving"
+            trend_summary = (
+                f"You're building positive momentum: {current_week_count} leads this week "
+                f"versus {previous_week_count} last week (+{trend_difference})."
+            )
+        else:
+            trend_state = "declining"
+            decline_diff = abs(trend_difference)
+            trend_summary = (
+                f"Activity has dipped: {current_week_count} leads this week compared to "
+                f"{previous_week_count} last week (-{decline_diff})."
+            )
+
+        insight_payload = {
+            "options": [
+                "Total leads",
+                "Leads by status",
+                "Leads by platform",
+                "Time-based trends"
+            ],
+            "total_leads": {
+                "total": total_leads,
+                "today": leads_this_day,
+                "this_week": leads_this_week,
+                "this_month": leads_this_month
+            },
+            "status_breakdown": status_breakdown,
+            "platform_breakdown": platform_breakdown,
+            "time_trends": {
+                "current_week": current_week_count,
+                "previous_week": previous_week_count,
+                "difference": trend_difference,
+                "trend": trend_state,
+                "summary": trend_summary
+            }
+        }
+
+        if platform_breakdown:
+            top_platform = platform_breakdown[0]
+            insight_payload["platform_highlight"] = {
+                "platform": top_platform["platform"],
+                "count": top_platform["count"],
+                "message": f"Top platform: {top_platform['platform']} ({top_platform['count']} leads)"
+            }
+
+        options_text = ", ".join(insight_payload["options"])
+        insight_type_normalized = None
+        if insight_type:
+            insight_type_normalized = insight_type.strip().lower()
+            if "time" in insight_type_normalized and "trend" in insight_type_normalized:
+                insight_type_normalized = "time_trends"
+        panel_cards = {
+            "summary": {
+                "label": "Total leads",
+                "data": insight_payload["total_leads"],
+                "message": (
+                    f"📊 Total leads {total_leads} · Today {leads_this_day} · Week {leads_this_week} · Month {leads_this_month}"
+                )
+            },
+            "status": {
+                "label": "Leads by status",
+                "data": status_breakdown,
+                "message": (
+                    "📋 Lead statuses:\n" +
+                    "\n".join(
+                        f"- {entry['status']}: {entry['count']}"
+                        for entry in status_breakdown
+                    ) if status_breakdown else "No status data available."
+                )
+            },
+            "platform": {
+                "label": "Leads by platform",
+                "data": platform_breakdown,
+                "message": (
+                    "📍 Leads sorted by platform:\n" +
+                    "\n".join(
+                        f"- {entry['platform']}: {entry['count']}"
+                        for entry in platform_breakdown
+                        if entry["count"]
+                    ) if platform_breakdown else "Platform data is not available yet."
+                )
+            },
+            "time_trends": {
+                "label": "Time-based trends",
+                "data": insight_payload["time_trends"],
+                "message": (
+                    f"{trend_summary}"
+                )
+            }
+        }
+
+        selected_panel = panel_cards.get(insight_type_normalized) if insight_type_normalized else None
+        if selected_panel:
+            message = selected_panel["message"]
+        else:
+            message = (
+                f"Here are the lead insights for {context_description}. Choose a panel you’d like to explore: "
+                f"{options_text}."
+            )
+
+        insight_payload["panels"] = panel_cards
+        insight_payload["selected_panel"] = insight_type_normalized if selected_panel else None
+        insight_payload["options_text"] = options_text
+
+        insight_context = {}
+        if lead_id:
+            insight_context["lead_id"] = lead_id
+        if lead_name:
+            insight_context["lead_name"] = lead_name
+        if platform:
+            insight_context["platform"] = platform
+
+        return {
+            "success": True,
+            "data": {
+                "message": message,
+                "insight_type": insight_type or "summary",
+                "date_range": date_range,
+                "insights": insight_payload,
+                "insight_context": insight_context
+            },
+            "asked_questions": {}
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error generating insights: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "success": False,
-            "clarifying_question": question_text,
-            "asked_questions": asked_questions
+            "error": f"Database error while generating insights: {str(e)}"
         }
-    
-    # Build insight query parameters
-    lead_identifier = lead_id or lead_name
-    platform_text = f" from {platform}" if platform else ""
-    date_range_text = f" for {date_range}" if date_range else ""
-    insight_type_text = f" ({insight_type})" if insight_type else ""
-    
-    # TODO: Integrate with actual lead insights database query
-    # This would query the leads table and generate insights like:
-    # - Lead conversion rate
-    # - Lead source performance
-    # - Lead status trends
-    # - Lead engagement metrics
-    # - Platform-specific insights
-    
-    return {
-        "success": True,
-        "data": {
-            "message": "I'll generate insights for the lead you asked about. This feature is being set up.",
-            "insights": {
-                "lead_name": lead_name,
-                "platform": platform,
-                "date_range": date_range,
-                "insight_type": insight_type or "summary",
-                "summary": "Lead insights will include conversion rates, engagement metrics, status trends, and platform performance analysis."
-            }
-        },
-        "asked_questions": asked_questions
-    }
 
